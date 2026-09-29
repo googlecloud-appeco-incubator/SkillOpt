@@ -78,6 +78,32 @@ COPILOT_CHAT_OPTIMIZER_MODEL = os.environ.get("COPILOT_CHAT_OPTIMIZER_MODEL", ""
 COPILOT_CHAT_TARGET_MODEL = os.environ.get("COPILOT_CHAT_TARGET_MODEL", "")
 COPILOT_CHAT_TIMEOUT = os.environ.get("COPILOT_CHAT_TIMEOUT", "600")
 
+
+def _resolve_agy_path(value: str) -> str:
+    """Resolve the Antigravity CLI, falling back to its installer's default dir.
+
+    ``curl -fsSL https://antigravity.google/cli/install.sh | bash`` drops the
+    binary in ``~/.local/bin``, which is often missing from non-login PATHs.
+    """
+    resolved = shutil.which(value)
+    if resolved:
+        return resolved
+    if value == "agy":
+        candidate = os.path.join(os.path.expanduser("~"), ".local", "bin", "agy")
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return value
+
+
+AGY_EXEC_PATH = _resolve_agy_path(os.environ.get("AGY_EXEC_PATH") or os.environ.get("AGY_CLI_BIN") or "agy")
+# Headless agy auto-denies every tool that needs approval (shell commands in
+# particular), which usually ends the turn with an empty response. Skipping
+# the prompt matches the claude_code_exec default (bypassPermissions).
+AGY_EXEC_SKIP_PERMISSIONS = _parse_bool(os.environ.get("AGY_EXEC_SKIP_PERMISSIONS"), True)
+AGY_EXEC_SANDBOX = _parse_bool(os.environ.get("AGY_EXEC_SANDBOX"), False)
+AGY_EXEC_MODE = os.environ.get("AGY_EXEC_MODE", "")
+AGY_EXEC_EFFORT = os.environ.get("AGY_EXEC_EFFORT", "")
+
 if _CODEX_EXEC_FULL_AUTO_ENV is not None:
     warnings.warn(
         "CODEX_EXEC_FULL_AUTO is deprecated and ignored; use "
@@ -130,6 +156,7 @@ def _parse_int(value: str | None, default: int) -> int:
 
 
 EXEC_EMPTY_RESPONSE_RETRIES = max(0, _parse_int(os.environ.get("EXEC_EMPTY_RESPONSE_RETRIES"), 1))
+AGY_CHAT_TIMEOUT = max(1, _parse_int(os.environ.get("AGY_CHAT_TIMEOUT"), 900))
 CLAUDE_CODE_EXEC_MAX_THINKING_TOKENS = max(
     0,
     _parse_int(os.environ.get("CLAUDE_CODE_EXEC_MAX_THINKING_TOKENS"), 16384),
@@ -148,11 +175,14 @@ def set_optimizer_backend(backend: str) -> None:
         "copilot_chat",
         "codex_exec",
         "claude_code_exec",
+        "gemini_chat",
+        "agy_exec",
     }:
         raise ValueError(
             f"Unsupported optimizer backend: {OPTIMIZER_BACKEND!r}. "
             "Supported values are 'openai_chat', 'claude_chat', 'qwen_chat', 'minimax_chat', "
-            "'openai_compatible', 'copilot_chat', 'codex_exec', and 'claude_code_exec'."
+            "'openai_compatible', 'copilot_chat', 'codex_exec', 'claude_code_exec', "
+            "'gemini_chat', and 'agy_exec'."
         )
     os.environ["OPTIMIZER_BACKEND"] = OPTIMIZER_BACKEND
 
@@ -164,12 +194,12 @@ def get_optimizer_backend() -> str:
 def set_target_backend(backend: str) -> None:
     global TARGET_BACKEND
     TARGET_BACKEND = normalize_backend_name(backend or "openai_chat")
-    if TARGET_BACKEND not in {"openai_chat", "claude_chat", "qwen_chat", "minimax_chat", "openai_compatible", "copilot_chat", "codex_exec", "claude_code_exec", "cursor_exec", "copilot_exec"}:
+    if TARGET_BACKEND not in {"openai_chat", "claude_chat", "qwen_chat", "minimax_chat", "openai_compatible", "copilot_chat", "gemini_chat", "codex_exec", "claude_code_exec", "cursor_exec", "copilot_exec", "agy_exec"}:
         raise ValueError(
             f"Unsupported target backend: {TARGET_BACKEND!r}. "
             "Supported values are 'openai_chat', 'claude_chat', 'qwen_chat', 'minimax_chat', "
-            "'openai_compatible', 'copilot_chat', 'codex_exec', 'claude_code_exec', "
-            "'cursor_exec', and 'copilot_exec'."
+            "'openai_compatible', 'copilot_chat', 'gemini_chat', 'codex_exec', 'claude_code_exec', "
+            "'cursor_exec', 'copilot_exec', and 'agy_exec'."
         )
     os.environ["TARGET_BACKEND"] = TARGET_BACKEND
 
@@ -179,7 +209,7 @@ def get_target_backend() -> str:
 
 
 def is_target_exec_backend() -> bool:
-    return TARGET_BACKEND in {"codex_exec", "claude_code_exec", "cursor_exec", "copilot_exec"}
+    return TARGET_BACKEND in {"codex_exec", "claude_code_exec", "cursor_exec", "copilot_exec", "agy_exec"}
 
 
 def is_optimizer_chat_backend() -> bool:
@@ -192,11 +222,13 @@ def is_optimizer_chat_backend() -> bool:
         "copilot_chat",
         "codex_exec",
         "claude_code_exec",
+        "gemini_chat",
+        "agy_exec",
     }
 
 
 def is_target_chat_backend() -> bool:
-    return TARGET_BACKEND in {"openai_chat", "claude_chat", "qwen_chat", "minimax_chat", "openai_compatible", "copilot_chat"}
+    return TARGET_BACKEND in {"openai_chat", "claude_chat", "qwen_chat", "minimax_chat", "openai_compatible", "copilot_chat", "gemini_chat"}
 
 
 _ALLOWED_CODEX_SANDBOXES = frozenset({"read-only", "workspace-write", "danger-full-access"})
@@ -522,3 +554,107 @@ def get_copilot_chat_config() -> dict[str, str | int]:
         "target_model": COPILOT_CHAT_TARGET_MODEL,
         "timeout": int(timeout),
     }
+
+
+_AGY_EFFORTS = frozenset({"low", "medium", "high", "max"})
+_AGY_MODES = frozenset({"", "accept-edits", "plan"})
+
+
+def normalize_agy_effort(value: Any) -> str:
+    """Map SkillOpt's shared reasoning vocabulary onto ``agy --effort``.
+
+    Blank/none/off means "do not pass --effort" (use the model slug's default).
+    """
+    effort = str(value or "").strip().lower()
+    if effort in {"", "none", "off"}:
+        return ""
+    if effort == "minimal":
+        return "low"
+    if effort == "xhigh":
+        return "max"
+    if effort not in _AGY_EFFORTS:
+        raise ValueError(
+            f"Invalid agy_exec effort: {value!r}. Expected one of "
+            "low, medium, high, max (or blank)."
+        )
+    return effort
+
+
+def configure_agy_exec(
+    *,
+    path: str | None = None,
+    skip_permissions: bool | str | int | None = None,
+    sandbox: bool | str | int | None = None,
+    mode: str | None = None,
+    effort: str | None = None,
+    chat_timeout: int | str | None = None,
+) -> None:
+    """Configure the Antigravity CLI (``agy``) backend (target exec and optimizer chat)."""
+    global AGY_EXEC_PATH, AGY_EXEC_SKIP_PERMISSIONS, AGY_EXEC_SANDBOX, AGY_EXEC_MODE, AGY_EXEC_EFFORT, AGY_CHAT_TIMEOUT
+    parsed_skip = (
+        None
+        if skip_permissions is None
+        else _coerce_bool_setting(skip_permissions, name="agy_exec_skip_permissions")
+    )
+    parsed_sandbox = None if sandbox is None else _coerce_bool_setting(sandbox, name="agy_exec_sandbox")
+    normalized_mode = None
+    if mode is not None:
+        normalized_mode = str(mode).strip().lower()
+        if normalized_mode not in _AGY_MODES:
+            raise ValueError("agy_exec mode must be blank, 'accept-edits', or 'plan'")
+    normalized_effort = None if effort is None else normalize_agy_effort(effort)
+    parsed_timeout = None
+    if chat_timeout is not None:
+        raw = str(chat_timeout).strip()
+        if not raw.isdigit() or int(raw) <= 0:
+            raise ValueError("agy_chat timeout must be a positive integer")
+        parsed_timeout = int(raw)
+
+    if path is not None:
+        AGY_EXEC_PATH = _resolve_agy_path(str(path).strip() or "agy")
+        os.environ["AGY_EXEC_PATH"] = AGY_EXEC_PATH
+    if parsed_skip is not None:
+        AGY_EXEC_SKIP_PERMISSIONS = parsed_skip
+        os.environ["AGY_EXEC_SKIP_PERMISSIONS"] = "true" if parsed_skip else "false"
+    if parsed_sandbox is not None:
+        AGY_EXEC_SANDBOX = parsed_sandbox
+        os.environ["AGY_EXEC_SANDBOX"] = "true" if parsed_sandbox else "false"
+    if normalized_mode is not None:
+        AGY_EXEC_MODE = normalized_mode
+        os.environ["AGY_EXEC_MODE"] = AGY_EXEC_MODE
+    if normalized_effort is not None:
+        AGY_EXEC_EFFORT = normalized_effort
+        os.environ["AGY_EXEC_EFFORT"] = AGY_EXEC_EFFORT
+    if parsed_timeout is not None:
+        AGY_CHAT_TIMEOUT = parsed_timeout
+        os.environ["AGY_CHAT_TIMEOUT"] = str(parsed_timeout)
+
+
+def get_agy_exec_config() -> dict[str, str | bool | int]:
+    return {
+        "path": AGY_EXEC_PATH,
+        "skip_permissions": AGY_EXEC_SKIP_PERMISSIONS,
+        "sandbox": AGY_EXEC_SANDBOX,
+        "mode": AGY_EXEC_MODE,
+        "effort": normalize_agy_effort(AGY_EXEC_EFFORT),
+        "chat_timeout": AGY_CHAT_TIMEOUT,
+        "empty_response_retries": EXEC_EMPTY_RESPONSE_RETRIES,
+    }
+
+
+def configure_agy_exec_from_config(config: Mapping[str, Any]) -> None:
+    """Configure agy from a flattened train/eval configuration.
+
+    ``agy_exec_effort`` falls back to the shared ``reasoning_effort``; set it to
+    ``none`` to omit ``--effort`` (required for models without effort variants,
+    such as ``gemini-3-flash-preview``). Blank values keep the environment.
+    """
+    effort = _first_nonempty(config, "agy_exec_effort", "reasoning_effort")
+    configure_agy_exec(
+        path=_first_nonempty(config, "agy_exec_path"),
+        skip_permissions=config.get("agy_exec_skip_permissions"),
+        sandbox=config.get("agy_exec_sandbox"),
+        mode=_first_nonempty(config, "agy_exec_mode"),
+        effort=None if effort is None else str(effort),
+        chat_timeout=_first_nonempty(config, "agy_chat_timeout"),
+    )

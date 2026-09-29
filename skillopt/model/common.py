@@ -31,6 +31,10 @@ _BACKEND_DEFAULT_MODELS = {
     "qwen_chat": "Qwen/Qwen3.5-4B",
     "minimax_chat": "MiniMax-M3",
     "openai_compatible": "gpt-4o-mini",
+    # Available on both Vertex AI and the Gemini Developer API, and a built-in
+    # `agy models` slug that runs without an --effort suffix.
+    "gemini_chat": "gemini-3.5-flash",
+    "agy_exec": "gemini-3.5-flash",
 }
 
 _BACKEND_ALIASES = {
@@ -61,6 +65,18 @@ _BACKEND_ALIASES = {
     "openai_compatible_chat": "openai_compatible",
     "openai-compatible": "openai_compatible",
     "compat": "openai_compatible",
+    "gemini": "gemini_chat",
+    "gemini_chat": "gemini_chat",
+    "google": "gemini_chat",
+    "google_genai": "gemini_chat",
+    "vertex": "gemini_chat",
+    "vertexai": "gemini_chat",
+    "vertex_ai": "gemini_chat",
+    "agy": "agy_exec",
+    "agy_exec": "agy_exec",
+    "antigravity": "agy_exec",
+    "antigravity_cli": "agy_exec",
+    "antigravity-cli": "agy_exec",
 }
 
 

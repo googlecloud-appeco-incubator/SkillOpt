@@ -7,6 +7,15 @@ All notable changes to SkillOpt are documented here. This project adheres to
 ## [Unreleased]
 
 ### Added
+- **Gemini and Antigravity CLI backends.** `gemini_chat` (aliases `gemini`,
+  `vertex`) calls Gemini through `google-genai` on Vertex AI (ADC) or the
+  Gemini Developer API for either role, with function tools, image inputs,
+  Gemini 3 thought-signature replay, and `reasoning_effort` mapped to thinking
+  levels. `agy_exec` (aliases `agy`, `antigravity`) runs the Antigravity CLI
+  headlessly as a target harness, persisting `agy_trace_summary.txt` /
+  `agy_trace_steps.txt` for the reflector, and can also serve as the
+  optimizer. `--backend agy` pairs an agy target with a Gemini optimizer.
+  Install the SDK with the new `gemini` extra.
 - **SkillOpt-Sleep paired A/B evalkit** (`python -m skillopt_sleep.evalkit`):
   McNemar plus percentile-bootstrap CIs on a fixed task manifest, with
   task-cluster multi-seed inference and seeded null calibration for exact-test

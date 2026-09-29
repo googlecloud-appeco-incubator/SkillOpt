@@ -222,6 +222,20 @@ def fmt_minibatch_trajectories(
                 if claude_steps:
                     header += f"\n#### Claude Trace Steps\n{claude_steps}\n"
 
+        # Antigravity CLI exec backend: summary plus per-tool steps parsed from
+        # agy's stream-json output. Same gating as the Claude trace above.
+        if os.environ.get("REFLACT_AGY_TRACE_TO_OPTIMIZER", "0") == "1":
+            for filename, title in (
+                ("agy_trace_summary.txt", "Antigravity Trace Summary"),
+                ("agy_trace_steps.txt", "Antigravity Trace Steps"),
+            ):
+                path = os.path.join(prediction_dir, tid, filename)
+                if os.path.exists(path):
+                    with open(path, encoding="utf-8") as f:
+                        text = f.read().strip()
+                    if text:
+                        header += f"\n#### {title}\n{text}\n"
+
         preview = item.get("spreadsheet_preview", "")
         if not preview:
             preview_path = os.path.join(prediction_dir, tid, "spreadsheet_preview.txt")

@@ -16,6 +16,7 @@ from typing import Any
 
 from skillopt.model.backend_config import (
     build_codex_exec_cli_config_overrides,
+    get_agy_exec_config,
     get_claude_code_exec_config,
     get_codex_exec_config,
     get_copilot_exec_config,
@@ -1974,6 +1975,388 @@ def run_copilot_exec(
     raise RuntimeError(f"{last_error}\n{detail}" if detail else last_error)
 
 
+# ── Antigravity CLI (agy) ────────────────────────────────────────────────────
+# agy runs headless with ``--print``. The prompt goes in on stdin as one
+# stream-json ``user`` event (no argv size limit), and the NDJSON output carries
+# an ``init`` event, one ``step_update`` event per agent/tool step, and a final
+# ``result`` event with the response, status, and token usage.
+
+_AGY_EFFORT_SUFFIXES = ("-low", "-medium", "-high", "-max")
+_AGY_TRACE_TEXT_LIMIT = 600
+
+
+def agy_model_args(model: str, effort: str) -> list[str]:
+    """Return ``--model``/``--effort`` flags agy accepts for this pair.
+
+    agy rejects ``--effort`` for an effort-suffixed slug (``gemini-3.8-flash-low``)
+    and for models without effort variants, so an explicit suffix always wins.
+    """
+    args: list[str] = []
+    if model:
+        args.extend(["--model", model])
+    if effort and not str(model or "").lower().endswith(_AGY_EFFORT_SUFFIXES):
+        args.extend(["--effort", effort])
+    return args
+
+
+def agy_stdin_message(prompt: str) -> str:
+    return json.dumps({"event": "user", "message": {"content": prompt}}, ensure_ascii=False) + "\n"
+
+
+def agy_subprocess_env() -> dict[str, str]:
+    """Environment for agy, forwarding the GOOGLE_API_KEY alias agy ignores."""
+    env = dict(os.environ)
+    if not env.get("GEMINI_API_KEY") and env.get("GOOGLE_API_KEY"):
+        env["GEMINI_API_KEY"] = env["GOOGLE_API_KEY"]
+    return env
+
+
+def _agy_events(raw: str):
+    for line in (raw or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            yield event
+
+
+def parse_agy_stream(raw: str) -> dict[str, Any]:
+    """Collect the init event, final step states, and result from agy NDJSON.
+
+    ``raw`` may hold several attempts; the last ``result`` wins. Step updates are
+    snapshots (ACTIVE, then DONE/ERROR), so only the latest per step is kept.
+    """
+    init: dict[str, Any] = {}
+    result: dict[str, Any] | None = None
+    steps: dict[tuple[str, int], dict[str, Any]] = {}
+    order: list[tuple[str, int]] = []
+    for event in _agy_events(raw):
+        kind = event.get("event")
+        if kind == "init":
+            init = dict(event.get("init") or {})
+            init.setdefault("conversation_id", event.get("conversation_id", ""))
+        elif kind == "step_update":
+            update = event.get("step_update") or {}
+            index = update.get("step_index")
+            if not isinstance(index, int):
+                continue
+            key = (str(update.get("conversation_id") or ""), index)
+            if key not in steps:
+                order.append(key)
+            steps[key] = update
+        elif kind == "result":
+            result = dict(event.get("result") or {})
+    return {"init": init, "steps": [steps[key] for key in order], "result": result}
+
+
+def _agy_truncate(text: str, limit: int = _AGY_TRACE_TEXT_LIMIT) -> str:
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def format_agy_trace_steps(raw: str, *, max_chars: int = 4000) -> str:
+    """Render agy tool activity as numbered lines for the reflector."""
+    lines: list[str] = []
+    for step in parse_agy_stream(raw)["steps"]:
+        step_type = str(step.get("step_type") or "")
+        state = str(step.get("state") or "")
+        if step_type == "tool":
+            info = step.get("tool_info") or {}
+            name = str(step.get("tool_name") or info.get("name") or "tool")
+            params = info.get("parameters")
+            args = _agy_truncate(json.dumps(params, ensure_ascii=False) if params else "")
+            line = f"[{step.get('step_index')}] {name}({args}) -> {state}"
+            error = info.get("error") or {}
+            if isinstance(error, dict) and error.get("message"):
+                line += f": {_agy_truncate(error['message'])}"
+            lines.append(line)
+        elif step_type == "agent_response" and state == "ERROR":
+            lines.append(f"[{step.get('step_index')}] agent_response -> ERROR")
+    text = "\n".join(lines)
+    if len(text) > max_chars:
+        text = text[: max_chars - 30].rstrip() + "\n... (trace truncated)"
+    return text
+
+
+def _build_agy_trace_summary(raw: str, response: str) -> str:
+    parsed = parse_agy_stream(raw)
+    init = parsed["init"]
+    result = parsed["result"] or {}
+    tool_steps = [step for step in parsed["steps"] if step.get("step_type") == "tool"]
+    tool_errors = []
+    for step in tool_steps:
+        if str(step.get("state") or "") != "ERROR":
+            continue
+        error = (step.get("tool_info") or {}).get("error") or {}
+        message = error.get("message") if isinstance(error, dict) else ""
+        tool_errors.append(f"{step.get('tool_name')}: {_agy_truncate(message, 160)}")
+    denied = [
+        str(item.get("display_name") or item.get("action") or "")
+        for item in result.get("denied_actions") or []
+        if isinstance(item, dict)
+    ]
+    usage = result.get("usage") or {}
+    if "<answer>" in (response or "").lower():
+        answer_format = "tagged"
+    elif (response or "").strip():
+        answer_format = "plain_text"
+    else:
+        answer_format = "missing"
+
+    parts = ["Antigravity CLI Trace Summary"]
+    if init.get("model"):
+        parts.append(f"- model: {init['model']}")
+    conversation_id = result.get("conversation_id") or init.get("conversation_id")
+    if conversation_id:
+        parts.append(f"- conversation id: {conversation_id}")
+    parts.append(f"- status: {result.get('status') or 'unknown'}")
+    if result.get("error"):
+        parts.append(f"- error: {_agy_truncate(result['error'], 300)}")
+    parts.append(f"- tool calls: {len(tool_steps)}")
+    parts.append(f"- tool errors: {' | '.join(tool_errors[:3]) if tool_errors else 'none'}")
+    if denied:
+        parts.append(f"- denied actions: {', '.join(denied)}")
+    if usage:
+        parts.append(
+            "- tokens: "
+            f"input={usage.get('input_tokens', 0)} output={usage.get('output_tokens', 0)} "
+            f"thinking={usage.get('thinking_tokens', 0)} cache_read={usage.get('cache_read_tokens', 0)}"
+        )
+    if result.get("duration_seconds") is not None:
+        parts.append(f"- duration seconds: {result.get('duration_seconds')}")
+    parts.append(f"- final answer format: {answer_format}")
+    parts.append(f"- final response chars: {len(response or '')}")
+    return "\n".join(parts)
+
+
+def _persist_agy_artifacts(work_dir: str, raw: str, response: str) -> None:
+    combined_raw = _persist_artifacts(
+        work_dir=work_dir,
+        raw=raw,
+        response=response,
+        prefix="agy",
+        summary_builder=_build_agy_trace_summary,
+    )
+    pred_dir = os.path.dirname(work_dir.rstrip(os.sep))
+    with open(os.path.join(pred_dir, "agy_trace_steps.txt"), "w", encoding="utf-8") as f:
+        f.write(format_agy_trace_steps(combined_raw))
+
+
+def _agy_process_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def _agy_is_setup_error(result: dict[str, Any] | None, returncode: int) -> bool:
+    """True for failures a retry cannot fix (unknown model, auth, bad flags).
+
+    agy reports these before a conversation starts: non-zero exit, ERROR status,
+    and no turns taken.
+    """
+    if not result or returncode == 0:
+        return False
+    return str(result.get("status") or "") == "ERROR" and not result.get("num_turns")
+
+
+def run_agy_exec(
+    *,
+    work_dir: str,
+    prompt: str,
+    model: str,
+    timeout: int,
+    images: list[str] | None = None,
+    data_dirs: list[str] | None = None,
+    allow_file_edits: bool = False,
+) -> tuple[str, str]:
+    """Run the Antigravity CLI headlessly as a benchmark target."""
+    config = get_agy_exec_config()
+    retries = int(config.get("empty_response_retries", 0) or 0)
+    add_dirs = _validated_add_dirs(work_dir, data_dirs, images)
+    all_raw: list[str] = []
+    last_response = ""
+
+    for attempt in range(retries + 1):
+        attempt_prompt = _exec_prompt(
+            _retry_prompt(prompt, attempt),
+            allow_file_edits=allow_file_edits,
+        )
+        cmd = [
+            str(config["path"]),
+            "--print",
+            "",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--disable-slash-commands",
+            "--print-timeout",
+            f"{max(1, int(timeout))}s",
+        ]
+        cmd.extend(agy_model_args(model, str(config.get("effort") or "")))
+        if config.get("skip_permissions"):
+            cmd.append("--dangerously-skip-permissions")
+        if config.get("sandbox"):
+            cmd.append("--sandbox")
+        if config.get("mode"):
+            cmd.extend(["--mode", str(config["mode"])])
+        for path in add_dirs:
+            cmd.extend(["--add-dir", path])
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=work_dir,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                # agy stops itself at --print-timeout; the grace period lets it
+                # flush the final result event before the hard kill.
+                timeout=int(timeout) + 30,
+                input=agy_stdin_message(attempt_prompt),
+                env=agy_subprocess_env(),
+            )
+        except subprocess.TimeoutExpired as exc:
+            raw = _agy_process_text(exc.stdout)
+            stderr = _agy_process_text(exc.stderr)
+            if stderr:
+                raw = f"{raw}\n[stderr]\n{stderr}" if raw else f"[stderr]\n{stderr}"
+            all_raw.append(f"===== AGY CLI ATTEMPT {attempt + 1} (timeout) =====\n{raw}")
+            combined = "\n\n".join(all_raw)
+            _persist_agy_artifacts(work_dir, combined, "")
+            return "", combined
+        except OSError as exc:
+            raise RuntimeError(
+                f"Antigravity CLI could not be executed ({config['path']!r}): {exc}. "
+                "Install it with `curl -fsSL https://antigravity.google/cli/install.sh | bash` "
+                "or set model.agy_exec_path."
+            ) from exc
+
+        stdout = proc.stdout or ""
+        stderr = proc.stderr or ""
+        raw = f"{stdout}\n[stderr]\n{stderr}" if stderr else stdout
+        all_raw.append(f"===== AGY CLI ATTEMPT {attempt + 1} =====\n{raw}")
+        combined = "\n\n".join(all_raw)
+
+        result = parse_agy_stream(stdout)["result"]
+        if _agy_is_setup_error(result, proc.returncode):
+            _persist_agy_artifacts(work_dir, combined, "")
+            detail = str((result or {}).get("error") or stderr or stdout).strip()[:4000]
+            raise RuntimeError(f"Antigravity CLI failed with exit code {proc.returncode}: {detail}")
+        if result is None and proc.returncode != 0:
+            _persist_agy_artifacts(work_dir, combined, "")
+            detail = (stderr or stdout).strip()[:4000]
+            raise RuntimeError(f"Antigravity CLI failed with exit code {proc.returncode}: {detail}")
+
+        response = str((result or {}).get("response") or "").strip()
+        last_response = response
+        if response:
+            _persist_agy_artifacts(work_dir, combined, response)
+            return response, combined
+
+    combined = "\n\n".join(all_raw)
+    _persist_agy_artifacts(work_dir, combined, last_response)
+    return last_response, combined
+
+
+def run_agy_chat(
+    *,
+    system: str,
+    prompt: str,
+    model: str,
+    timeout: int | None = None,
+    schema: dict[str, Any] | None = None,
+    effort: str | None = None,
+) -> tuple[str, dict[str, int]]:
+    """Run agy as a plain chat model (optimizer role).
+
+    Runs in an empty scratch directory without --dangerously-skip-permissions,
+    so tools that need approval are denied rather than executed. Returns the
+    response text (the structured JSON when ``schema`` is given) and usage.
+    """
+    from skillopt.model.backend_config import normalize_agy_effort
+
+    config = get_agy_exec_config()
+    effective_timeout = int(timeout or config.get("chat_timeout") or 900)
+    resolved_effort = normalize_agy_effort(effort) if effort is not None else str(config.get("effort") or "")
+    parts = []
+    if system.strip():
+        parts.append(f"<system_instructions>\n{system.strip()}\n</system_instructions>")
+    parts.append(
+        "Answer directly from the text in this message. Do not use tools, run "
+        "commands, or read or write files."
+    )
+    parts.append(prompt)
+    message = "\n\n".join(parts)
+
+    cmd = [
+        str(config["path"]),
+        "--print",
+        "",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--disable-slash-commands",
+        "--print-timeout",
+        f"{effective_timeout}s",
+    ]
+    cmd.extend(agy_model_args(model, resolved_effort))
+    if schema is not None:
+        cmd.extend(["--json-schema", json.dumps(schema, ensure_ascii=False)])
+
+    with tempfile.TemporaryDirectory(prefix="skillopt_agy_chat_") as scratch:
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=scratch,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=effective_timeout + 30,
+                input=agy_stdin_message(message),
+                env=agy_subprocess_env(),
+            )
+        except OSError as exc:
+            raise RuntimeError(
+                f"Antigravity CLI could not be executed ({config['path']!r}): {exc}"
+            ) from exc
+
+    result = parse_agy_stream(proc.stdout or "")["result"]
+    if result is None:
+        detail = ((proc.stderr or "") or (proc.stdout or "")).strip()[:4000]
+        raise RuntimeError(f"Antigravity CLI returned no result (exit {proc.returncode}): {detail}")
+    if str(result.get("status") or "") != "SUCCESS":
+        raise RuntimeError(f"Antigravity CLI returned {result.get('status')}: {result.get('error') or ''}".strip())
+
+    usage = result.get("usage") or {}
+    prompt_tokens = int(usage.get("input_tokens", 0) or 0)
+    completion_tokens = int(usage.get("output_tokens", 0) or 0) + int(usage.get("thinking_tokens", 0) or 0)
+    usage_info = {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+    }
+    if schema is not None:
+        structured = result.get("structured_output")
+        if isinstance(structured, dict):
+            return json.dumps(structured, ensure_ascii=False), usage_info
+    text = str(result.get("response") or "").strip()
+    if not text:
+        denied = result.get("denied_actions") or []
+        hint = f" (agy denied tool actions: {denied})" if denied else ""
+        raise RuntimeError(f"Antigravity CLI returned an empty response{hint}")
+    return text, usage_info
+
+
 def run_target_exec(
     *,
     work_dir: str,
@@ -2025,6 +2408,16 @@ def run_target_exec(
         )
     if backend == "copilot_exec":
         return run_copilot_exec(
+            work_dir=work_dir,
+            prompt=prompt,
+            model=model,
+            timeout=timeout,
+            images=images,
+            data_dirs=data_dirs,
+            allow_file_edits=allow_file_edits,
+        )
+    if backend == "agy_exec":
+        return run_agy_exec(
             work_dir=work_dir,
             prompt=prompt,
             model=model,

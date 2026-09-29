@@ -21,6 +21,8 @@ selecting the generic OpenAI-compatible backend.
 | `claude_code_exec` | ✓ | ✓ |
 | `cursor_exec` | — | ✓ |
 | `copilot_exec` | — | ✓ |
+| `gemini_chat` | ✓ | ✓ |
+| `agy_exec` | ✓ | ✓ |
 
 MiniMax currently has one shared deployment. `model.minimax_model` is applied
 when MiniMax is the target; mixed-backend runs cannot independently choose a
@@ -109,6 +111,18 @@ winner. Prefer `thinking_mode`; use `disabled` when you need the field sent.
 | `model.copilot_exec_allow_all_tools` | Optional opt-in to `--allow-all-tools`; unset by default so `COPILOT_EXEC_ALLOW_ALL_TOOLS` remains authoritative |
 | `model.copilot_chat_optimizer_model` / `model.copilot_chat_target_model` | Optional per-role `--model` IDs for `copilot_chat` |
 | `model.copilot_chat_timeout` | Per-call timeout in seconds for `copilot_chat` |
+| `model.gemini_api_key` | Gemini Developer API key; blank uses `GEMINI_API_KEY` / `GOOGLE_API_KEY` |
+| `model.gemini_use_vertexai` | `true` forces Vertex AI, `false` the Gemini Developer API; `null` uses `GOOGLE_GENAI_USE_VERTEXAI`, else Vertex AI unless only an API key is set |
+| `model.gemini_project` / `model.gemini_location` | Vertex AI project and location; blank uses `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION` (default `global`) |
+| `model.gemini_thinking_level` | `minimal`, `low`, `medium`, or `high`; blank derives it from `reasoning_effort` |
+| `model.gemini_temperature` / `model.gemini_max_tokens` / `model.gemini_timeout_seconds` | Sampling temperature (default: model default), output cap including thinking tokens (default 65536), request timeout in seconds (default 600) |
+| `model.agy_exec_path` | Antigravity CLI path; blank uses `AGY_EXEC_PATH`, `agy` on `PATH`, then `~/.local/bin/agy` |
+| `model.agy_exec_effort` | `--effort` for bare model slugs (`low`, `medium`, `high`, `max`, or `none`); blank falls back to `reasoning_effort` |
+| `model.agy_exec_skip_permissions` | Pass `--dangerously-skip-permissions` to rollouts; `null` keeps `AGY_EXEC_SKIP_PERMISSIONS` (default `true`) |
+| `model.agy_exec_sandbox` | Pass `--sandbox`; `null` keeps `AGY_EXEC_SANDBOX` (default `false`) |
+| `model.agy_exec_mode` | Optional agy `--mode` (`accept-edits` or `plan`) |
+| `model.agy_chat_timeout` | Timeout in seconds for `agy_exec` optimizer calls (default 900) |
+| `model.agy_trace_to_optimizer` | When `true` (default) and target is `agy_exec`, inject agy's trace summary and tool steps into the reflection prompt |
 
 For compatibility, `model.codex_bin`, `model.codex_cli_bin`, and
 `model.codex_path` are aliases for `model.codex_exec_path`;

@@ -60,12 +60,14 @@ from skillopt.optimizer.update_modes import (
 )
 from skillopt.model import (
     chat_optimizer,
+    configure_agy_exec_from_config,
     configure_azure_openai,
     configure_claude_code_exec,
     configure_codex_exec_from_config,
     configure_copilot_chat,
     configure_copilot_exec,
     configure_cursor_exec,
+    configure_gemini_chat_from_config,
     configure_minimax_chat,
     configure_qwen_chat,
     get_qwen_thinking_modes,
@@ -472,6 +474,11 @@ def _configure_trace_to_optimizer_gates(target_backend: str, cfg: dict) -> None:
         if target_backend == "claude_code_exec" and cfg.get("claude_trace_to_optimizer", False)
         else "0"
     )
+    os.environ["REFLACT_AGY_TRACE_TO_OPTIMIZER"] = (
+        "1"
+        if target_backend == "agy_exec" and cfg.get("agy_trace_to_optimizer", False)
+        else "0"
+    )
 
 
 def _resolve_role_backends(
@@ -535,6 +542,19 @@ def _resolve_role_backends(
             optimizer_backend = "openai_compatible"
         if target_backend in _ROLE_BACKEND_DEFAULTS:
             target_backend = "openai_compatible"
+    elif backend == "gemini_chat":
+        if optimizer_backend in _ROLE_BACKEND_DEFAULTS:
+            optimizer_backend = "gemini_chat"
+        if target_backend in _ROLE_BACKEND_DEFAULTS:
+            target_backend = "gemini_chat"
+    elif backend == "agy_exec":
+        # agy produces the target trace; Gemini is the default reflector so the
+        # whole run stays on Google credentials. --optimizer_backend agy_exec
+        # (or any other backend) still wins.
+        if optimizer_backend in _ROLE_BACKEND_DEFAULTS:
+            optimizer_backend = "gemini_chat"
+        if target_backend in _ROLE_BACKEND_DEFAULTS:
+            target_backend = "agy_exec"
     else:
         optimizer_backend = optimizer_backend or "openai_chat"
         target_backend = target_backend or "openai_chat"
@@ -798,6 +818,8 @@ class ReflACTTrainer:
             target_model=cfg.get("copilot_chat_target_model") or None,
             timeout=cfg.get("copilot_chat_timeout") or None,
         )
+        configure_gemini_chat_from_config(cfg)
+        configure_agy_exec_from_config(cfg)
         configure_qwen_chat(
             base_url=cfg.get("qwen_chat_base_url") or None,
             api_key=cfg.get("qwen_chat_api_key") or None,

@@ -76,6 +76,29 @@ model:
   optimizer_minimax_api_key: ""
   target_minimax_api_key: ""
 
+  # Google Gemini (gemini_chat roles). Blank values fall back to the standard
+  # google-genai environment: GOOGLE_GENAI_USE_VERTEXAI, GOOGLE_CLOUD_PROJECT,
+  # GOOGLE_CLOUD_LOCATION (default global), GEMINI_API_KEY / GOOGLE_API_KEY.
+  # Vertex AI (ADC) is used unless an API key is the only credential.
+  gemini_api_key: ""
+  gemini_use_vertexai: null
+  gemini_project: ""
+  gemini_location: ""
+  gemini_temperature: null      # null keeps the model default (recommended for Gemini 3)
+  gemini_max_tokens: null       # output cap incl. thinking tokens; default 65536
+  gemini_timeout_seconds: null  # default 600
+  gemini_thinking_level: ""     # minimal|low|medium|high; blank derives it from reasoning_effort
+
+  # Antigravity CLI (agy_exec target, and optionally the optimizer). agy uses
+  # its own sign-in; for headless ADC auth export AGY_ADC_AUTH=true.
+  agy_exec_path: ""               # blank uses AGY_EXEC_PATH, agy on PATH, or ~/.local/bin/agy
+  agy_exec_skip_permissions: null # null keeps AGY_EXEC_SKIP_PERMISSIONS (default true)
+  agy_exec_sandbox: null          # true adds --sandbox (terminal restrictions)
+  agy_exec_mode: ""               # blank, accept-edits, or plan
+  agy_exec_effort: ""             # low|medium|high|max|none; blank uses reasoning_effort
+  agy_chat_timeout: null          # optimizer-call timeout in seconds (default 900)
+  agy_trace_to_optimizer: true
+
 train:
   num_epochs: 4
   train_size: 0          # 0 = derive from dataset split when available

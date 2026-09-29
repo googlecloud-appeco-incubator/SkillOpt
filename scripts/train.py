@@ -144,7 +144,7 @@ def parse_args() -> argparse.Namespace:
     # Legacy flat CLI overrides (still work, prefer --cfg-options for new usage)
     p.add_argument("--env", type=str)
     p.add_argument("--backend", type=str,
-                   choices=["azure_openai", "codex", "codex_exec", "claude", "claude_chat", "claude_code_exec", "cursor", "cursor_exec", "copilot", "copilot_chat", "copilot_exec", "qwen", "qwen_chat", "minimax", "minimax_chat"])
+                   choices=["azure_openai", "codex", "codex_exec", "claude", "claude_chat", "claude_code_exec", "cursor", "cursor_exec", "copilot", "copilot_chat", "copilot_exec", "qwen", "qwen_chat", "minimax", "minimax_chat", "openai_compatible", "gemini", "gemini_chat", "vertex", "agy", "agy_exec", "antigravity"])
     p.add_argument("--optimizer_model", type=str)
     p.add_argument("--target_model", type=str)
     p.add_argument("--optimizer_backend", type=str)
@@ -232,6 +232,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--copilot_chat_target_model", type=str)
     p.add_argument("--copilot_chat_timeout", type=int)
     p.add_argument("--codex_trace_to_optimizer", type=_BOOL)
+    p.add_argument("--gemini_api_key", type=str)
+    p.add_argument("--gemini_use_vertexai", type=_BOOL)
+    p.add_argument("--gemini_project", type=str)
+    p.add_argument("--gemini_location", type=str)
+    p.add_argument("--gemini_temperature", type=float)
+    p.add_argument("--gemini_max_tokens", type=int)
+    p.add_argument("--gemini_timeout_seconds", type=float)
+    p.add_argument("--gemini_thinking_level", type=str)
+    p.add_argument("--agy_exec_path", type=str)
+    p.add_argument("--agy_exec_skip_permissions", type=_BOOL)
+    p.add_argument("--agy_exec_sandbox", type=_BOOL)
+    p.add_argument("--agy_exec_mode", type=str)
+    p.add_argument("--agy_exec_effort", type=str)
+    p.add_argument("--agy_chat_timeout", type=int)
     p.add_argument("--skill_init", type=str)
     p.add_argument("--num_epochs", type=int)
     p.add_argument("--train_size", type=int)
@@ -449,6 +463,20 @@ _LEGACY_TO_STRUCTURED: dict[str, str] = {
     "copilot_chat_target_model": "model.copilot_chat_target_model",
     "copilot_chat_timeout": "model.copilot_chat_timeout",
     "codex_trace_to_optimizer": "model.codex_trace_to_optimizer",
+    "gemini_api_key": "model.gemini_api_key",
+    "gemini_use_vertexai": "model.gemini_use_vertexai",
+    "gemini_project": "model.gemini_project",
+    "gemini_location": "model.gemini_location",
+    "gemini_temperature": "model.gemini_temperature",
+    "gemini_max_tokens": "model.gemini_max_tokens",
+    "gemini_timeout_seconds": "model.gemini_timeout_seconds",
+    "gemini_thinking_level": "model.gemini_thinking_level",
+    "agy_exec_path": "model.agy_exec_path",
+    "agy_exec_skip_permissions": "model.agy_exec_skip_permissions",
+    "agy_exec_sandbox": "model.agy_exec_sandbox",
+    "agy_exec_mode": "model.agy_exec_mode",
+    "agy_exec_effort": "model.agy_exec_effort",
+    "agy_chat_timeout": "model.agy_chat_timeout",
     "num_epochs": "train.num_epochs",
     "train_size": "train.train_size",
     "steps_per_epoch": "train.steps_per_epoch",
@@ -679,6 +707,14 @@ def load_config(args: argparse.Namespace) -> dict:
         elif backend == "openai_compatible":
             _set_role("optimizer_backend", "openai_compatible")
             _set_role("target_backend", "openai_compatible")
+        elif backend == "gemini_chat":
+            _set_role("optimizer_backend", "gemini_chat")
+            _set_role("target_backend", "gemini_chat")
+        elif backend == "agy_exec":
+            # agy runs the target; Gemini reflects by default so the whole run
+            # uses Google credentials. An explicit optimizer backend still wins.
+            _set_role("optimizer_backend", "gemini_chat")
+            _set_role("target_backend", "agy_exec")
         else:
             _set_role("optimizer_backend", "openai_chat")
             _set_role("target_backend", "openai_chat")
@@ -744,6 +780,14 @@ def load_config(args: argparse.Namespace) -> dict:
                 flat.get("minimax_model")
                 or default_model_for_backend("minimax_chat")
             )
+
+    for _role in ("optimizer", "target"):
+        _role_backend = flat.get(f"{_role}_backend")
+        if _role_backend in {"gemini_chat", "agy_exec"} and (
+            str(flat.get(f"{_role}_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS
+            and not _has_model_override(f"model.{_role}", f"{_role}_model")
+        ):
+            flat[f"{_role}_model"] = default_model_for_backend(_role_backend)
 
     # Auto-generate output root
     if not flat.get("out_root"):

@@ -119,6 +119,8 @@ skillopt/model/
 ├── openai_compatible_backend.py    # generic Chat Completions example
 ├── qwen_backend.py                 # raw-HTTP chat example with per-role config
 ├── minimax_backend.py              # compact raw-HTTP chat example
+├── gemini_backend.py               # google-genai SDK chat example (tools, images)
+├── agy_backend.py                  # CLI-backed optimizer (Antigravity) example
 ├── codex_harness.py                # target-only exec harnesses
 └── router.py                       # legacy single-backend compatibility surface
 ```

@@ -31,12 +31,14 @@ from skillopt.utils.console import force_utf8_stdout_stderr
 force_utf8_stdout_stderr()
 
 from skillopt.model import (
+    configure_agy_exec_from_config,
     configure_azure_openai,
     configure_claude_code_exec,
     configure_codex_exec_from_config,
     configure_copilot_chat,
     configure_copilot_exec,
     configure_cursor_exec,
+    configure_gemini_chat_from_config,
     configure_minimax_chat,
     configure_qwen_chat,
     set_optimizer_backend,
@@ -161,7 +163,7 @@ def parse_args() -> argparse.Namespace:
     # Legacy flat overrides
     p.add_argument("--env", type=str)
     p.add_argument("--backend", type=str,
-                   choices=["azure_openai", "codex", "codex_exec", "claude", "claude_chat", "claude_code_exec", "cursor", "cursor_exec", "copilot", "copilot_chat", "copilot_exec", "minimax", "minimax_chat"])
+                   choices=["azure_openai", "codex", "codex_exec", "claude", "claude_chat", "claude_code_exec", "cursor", "cursor_exec", "copilot", "copilot_chat", "copilot_exec", "minimax", "minimax_chat", "openai_compatible", "gemini", "gemini_chat", "vertex", "agy", "agy_exec", "antigravity"])
     p.add_argument("--optimizer_model", type=str)
     p.add_argument("--target_model", type=str)
     p.add_argument("--optimizer_backend", type=str)
@@ -215,6 +217,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--copilot_exec_path", type=str)
     p.add_argument("--copilot_exec_home", type=str)
     p.add_argument("--copilot_exec_allow_all_tools", type=_BOOL)
+    p.add_argument("--gemini_api_key", type=str)
+    p.add_argument("--gemini_use_vertexai", type=_BOOL)
+    p.add_argument("--gemini_project", type=str)
+    p.add_argument("--gemini_location", type=str)
+    p.add_argument("--gemini_temperature", type=float)
+    p.add_argument("--gemini_max_tokens", type=int)
+    p.add_argument("--gemini_timeout_seconds", type=float)
+    p.add_argument("--gemini_thinking_level", type=str)
+    p.add_argument("--agy_exec_path", type=str)
+    p.add_argument("--agy_exec_skip_permissions", type=_BOOL)
+    p.add_argument("--agy_exec_sandbox", type=_BOOL)
+    p.add_argument("--agy_exec_mode", type=str)
+    p.add_argument("--agy_exec_effort", type=str)
+    p.add_argument("--agy_chat_timeout", type=int)
     p.add_argument("--copilot_chat_optimizer_model", type=str)
     p.add_argument("--copilot_chat_target_model", type=str)
     p.add_argument("--copilot_chat_timeout", type=int)
@@ -308,6 +324,20 @@ def main() -> None:
                 "copilot_chat_optimizer_model": "model.copilot_chat_optimizer_model",
                 "copilot_chat_target_model": "model.copilot_chat_target_model",
                 "copilot_chat_timeout": "model.copilot_chat_timeout",
+                "gemini_api_key": "model.gemini_api_key",
+                "gemini_use_vertexai": "model.gemini_use_vertexai",
+                "gemini_project": "model.gemini_project",
+                "gemini_location": "model.gemini_location",
+                "gemini_temperature": "model.gemini_temperature",
+                "gemini_max_tokens": "model.gemini_max_tokens",
+                "gemini_timeout_seconds": "model.gemini_timeout_seconds",
+                "gemini_thinking_level": "model.gemini_thinking_level",
+                "agy_exec_path": "model.agy_exec_path",
+                "agy_exec_skip_permissions": "model.agy_exec_skip_permissions",
+                "agy_exec_sandbox": "model.agy_exec_sandbox",
+                "agy_exec_mode": "model.agy_exec_mode",
+                "agy_exec_effort": "model.agy_exec_effort",
+                "agy_chat_timeout": "model.agy_chat_timeout",
                 "minimax_region": "model.minimax_region",
                 "minimax_base_url": "model.minimax_base_url",
                 "minimax_api_key": "model.minimax_api_key",
@@ -405,6 +435,14 @@ def main() -> None:
         elif backend == "openai_compatible":
             _set_role("optimizer_backend", "openai_compatible")
             _set_role("target_backend", "openai_compatible")
+        elif backend == "gemini_chat":
+            _set_role("optimizer_backend", "gemini_chat")
+            _set_role("target_backend", "gemini_chat")
+        elif backend == "agy_exec":
+            # agy runs the target; Gemini reflects by default so the whole run
+            # uses Google credentials. An explicit optimizer backend still wins.
+            _set_role("optimizer_backend", "gemini_chat")
+            _set_role("target_backend", "agy_exec")
         else:
             _set_role("optimizer_backend", "openai_chat")
             _set_role("target_backend", "openai_chat")
@@ -458,6 +496,14 @@ def main() -> None:
                 cfg.get("minimax_model")
                 or default_model_for_backend("minimax_chat")
             )
+
+    for _role in ("optimizer", "target"):
+        _role_backend = cfg.get(f"{_role}_backend")
+        if _role_backend in {"gemini_chat", "agy_exec"} and (
+            str(cfg.get(f"{_role}_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS
+            and not _has_model_override(f"model.{_role}", f"{_role}_model")
+        ):
+            cfg[f"{_role}_model"] = default_model_for_backend(_role_backend)
 
     if not cfg.get("out_root"):
         env = cfg.get("env", "unknown")
@@ -527,6 +573,8 @@ def main() -> None:
         target_model=cfg.get("copilot_chat_target_model") or None,
         timeout=cfg.get("copilot_chat_timeout") or None,
     )
+    configure_gemini_chat_from_config(cfg)
+    configure_agy_exec_from_config(cfg)
     configure_qwen_chat(
         base_url=cfg.get("qwen_chat_base_url") or None,
         api_key=cfg.get("qwen_chat_api_key") or None,

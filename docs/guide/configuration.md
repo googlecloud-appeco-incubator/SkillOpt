@@ -48,6 +48,8 @@ model:
 | `claude_code_exec` | ✓ | ✓ | Claude Code CLI execution harness |
 | `cursor_exec` | — | ✓ | Cursor Agent CLI execution harness |
 | `copilot_exec` | — | ✓ | GitHub Copilot CLI execution harness |
+| `gemini_chat` | ✓ | ✓ | Google Gemini via `google-genai` (Vertex AI with ADC, or a Gemini API key); aliases `gemini`, `vertex` |
+| `agy_exec` | ✓ | ✓ | Antigravity CLI (`agy`) execution harness; aliases `agy`, `antigravity` |
 
 `copilot_chat` fills **both** roles through a locally installed,
 CLI-authenticated client, so `--backend copilot` runs a complete training loop
@@ -68,6 +70,52 @@ MiniMax is served from region-specific hosts. Select one with
 `global_en` (default) resolves to `https://api.minimax.io/v1` and `cn_zh`
 resolves to `https://api.minimaxi.com/v1`. An explicit
 `model.minimax_base_url` or `MINIMAX_BASE_URL` overrides the region default.
+
+### Gemini and Antigravity (agy)
+
+`gemini_chat` calls Gemini through the official `google-genai` SDK
+(`pip install -e ".[gemini]"`). It fills both roles with `--backend gemini`,
+supports tool calling (function tools; `web_search` maps to Google Search
+grounding), `image_url` inputs, and token accounting. It authenticates the way
+`google-genai` does:
+
+- **Vertex AI** (default when no API key is set): Application Default
+  Credentials plus `GOOGLE_CLOUD_PROJECT`; `GOOGLE_CLOUD_LOCATION` defaults to
+  `global`. Force it with `GOOGLE_GENAI_USE_VERTEXAI=true`.
+- **Gemini Developer API**: `GEMINI_API_KEY` (or `GOOGLE_API_KEY`).
+
+The shared `reasoning_effort` becomes a Gemini thinking level (Gemini 3:
+`minimal`/`low`/`medium`/`high`, with Pro limited to `low`/`high`) or a
+thinking budget (Gemini 2.5). Pin a level with `model.gemini_thinking_level`.
+
+`agy_exec` runs the [Antigravity CLI](https://antigravity.google/docs/cli/install)
+headlessly inside the benchmark workspace, like `claude_code_exec`. The prompt
+is sent on stdin as stream-json, and every tool step is parsed from agy's
+stream-json output into `agy_trace_summary.txt` / `agy_trace_steps.txt`, which
+the reflector reads when `model.agy_trace_to_optimizer` is on (the default).
+`--backend agy` pairs the agy target with a `gemini_chat` optimizer so the whole
+run uses Google credentials; set `model.optimizer_backend=agy_exec` to reflect
+through agy as well.
+
+```bash
+curl -fsSL https://antigravity.google/cli/install.sh | bash   # installs ~/.local/bin/agy
+export AGY_ADC_AUTH=true                  # headless auth from ADC (or sign in once with `agy`)
+export GOOGLE_CLOUD_PROJECT=my-project    # used by gemini_chat on Vertex AI
+skillopt-train --config configs/searchqa/default.yaml --backend agy \
+  --cfg-options model.target=gemini-3.8-flash-low model.optimizer=gemini-3.5-flash
+```
+
+agy model slugs come from `agy models`. A slug with an effort suffix
+(`gemini-3.8-flash-low`) is passed as is; for a bare slug, SkillOpt adds
+`--effort` from `model.agy_exec_effort`, falling back to `reasoning_effort`.
+Set `model.agy_exec_effort=none` for models without effort variants, such as
+`gemini-3-flash-preview`. Headless agy auto-denies tools that need approval,
+which usually ends the turn with an empty answer, so rollouts pass
+`--dangerously-skip-permissions` by default (the same policy as
+`claude_code_exec`); set `model.agy_exec_skip_permissions=false` to disable it,
+and `model.agy_exec_sandbox=true` to add agy's terminal sandbox. agy reads its
+settings, skills, and MCP servers from `~/.gemini/antigravity-cli`, so user
+customizations there also apply during rollouts.
 
 For a generic compatible provider, select the role backends explicitly rather
 than relying on a high-level shorthand:
@@ -216,6 +264,20 @@ Model credentials are loaded from environment variables:
 | `COPILOT_CHAT_OPTIMIZER_MODEL` | `copilot_chat` | Optional model ID passed as `--model` for optimizer calls |
 | `COPILOT_CHAT_TARGET_MODEL` | `copilot_chat` | Optional model ID passed as `--model` for target calls |
 | `COPILOT_CHAT_TIMEOUT` | `copilot_chat` | Per-call timeout in seconds |
+| `GOOGLE_GENAI_USE_VERTEXAI` | `gemini_chat` | `true` forces Vertex AI; `false` forces the Gemini Developer API. Unset: Vertex AI unless an API key is the only credential |
+| `GOOGLE_CLOUD_PROJECT` | `gemini_chat` | Vertex AI project |
+| `GOOGLE_CLOUD_LOCATION` | `gemini_chat` | Vertex AI location; defaults to `global` |
+| `GEMINI_API_KEY` | `gemini_chat`, `agy_exec` | Gemini Developer API key (`GOOGLE_API_KEY` is accepted as an alias) |
+| `GEMINI_MODEL` | `gemini_chat` | Model for direct library use (`OPTIMIZER_GEMINI_MODEL` / `TARGET_GEMINI_MODEL` per role); train/eval YAML role models take precedence |
+| `GEMINI_THINKING_LEVEL` | `gemini_chat` | Pin `minimal`, `low`, `medium`, or `high` instead of deriving it from `reasoning_effort` |
+| `GEMINI_MAX_TOKENS` / `GEMINI_TIMEOUT_SECONDS` / `GEMINI_TEMPERATURE` | `gemini_chat` | Output cap (default 65536, includes thinking), request timeout (default 600), and temperature (default: model default) |
+| `AGY_EXEC_PATH` | `agy_exec` | Path to `agy`; defaults to `agy` on `PATH`, then `~/.local/bin/agy` |
+| `AGY_ADC_AUTH` | `agy_exec` | Read by agy itself: `true` authenticates from Application Default Credentials |
+| `AGY_EXEC_SKIP_PERMISSIONS` | `agy_exec` | Pass `--dangerously-skip-permissions` (default `true`) |
+| `AGY_EXEC_SANDBOX` | `agy_exec` | Pass `--sandbox` (default `false`) |
+| `AGY_EXEC_MODE` | `agy_exec` | Optional `--mode`: `accept-edits` or `plan` |
+| `AGY_EXEC_EFFORT` | `agy_exec` | `--effort` for bare model slugs: `low`, `medium`, `high`, `max`, or blank |
+| `AGY_CHAT_TIMEOUT` | `agy_exec` | Optimizer-call timeout in seconds (default 900) |
 
 `OPTIMIZER_` and `TARGET_` prefixes provide per-role overrides for the
 Azure, OpenAI-compatible, and Qwen variable families. See the
